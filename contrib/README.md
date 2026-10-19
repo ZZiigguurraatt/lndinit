@@ -34,9 +34,11 @@ contrib/build-dev-image [options] <base-context>
 ```
 
 `<base-context>` is a local path (e.g. `../lnd`), a git URL with an optional
-`#ref` (branch, tag, or commit), or a GitHub PR URL
-(`https://github.com/<owner>/<repo>/pull/<n>`). It defaults to upstream `lnd`
-master (`https://github.com/lightningnetwork/lnd.git#master`), or
+`#ref` (branch, tag, or commit), a GitHub PR URL
+(`https://github.com/<owner>/<repo>/pull/<n>`), a GitHub branch/tag page URL
+(`https://github.com/<owner>/<repo>/tree/<branch>`), or a GitHub release URL
+(`https://github.com/<owner>/<repo>/releases/tag/<tag>`). It defaults to
+upstream `lnd` master (`https://github.com/lightningnetwork/lnd.git#master`), or
 `lightning-terminal` master with `--litd`, when omitted.
 
 The script builds the base from that context using the base's own
@@ -77,6 +79,13 @@ contrib/build-dev-image --push --name my.registry/lndinit --tag dev \
 # Build a specific lnd PR (by number, or paste the PR URL):
 contrib/build-dev-image --pr 9500
 contrib/build-dev-image https://github.com/lightningnetwork/lnd/pull/9500
+
+# A branch in a fork, by pasting its GitHub branch page URL:
+contrib/build-dev-image https://github.com/<user>/lnd/tree/<branch>
+
+# A tagged release, by pasting its GitHub tree or release page URL (both work):
+contrib/build-dev-image https://github.com/lightningnetwork/lnd/tree/v0.21.4-beta
+contrib/build-dev-image https://github.com/lightningnetwork/lnd/releases/tag/v0.21.4-beta
 
 # litd base from a local checkout — a directory named exactly lightning-terminal
 # auto-selects litd (any other name needs --litd):

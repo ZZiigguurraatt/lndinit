@@ -23,9 +23,13 @@
 #
 #   <base-context>   Build context for the base image: a local path (e.g.
 #                    ../lnd), a git URL with an optional #ref (branch, tag, or
-#                    commit), or a GitHub PR URL
-#                    (https://github.com/<owner>/<repo>/pull/<n>). Defaults to
-#                    upstream lnd master
+#                    commit), a GitHub PR URL
+#                    (https://github.com/<owner>/<repo>/pull/<n>), a GitHub
+#                    branch/tag page URL
+#                    (https://github.com/<owner>/<repo>/tree/<branch>), or a
+#                    GitHub release URL
+#                    (https://github.com/<owner>/<repo>/releases/tag/<tag>).
+#                    Defaults to upstream lnd master
 #                    (https://github.com/lightningnetwork/lnd.git#master), or
 #                    lightning-terminal master with --litd.
 #
@@ -88,6 +92,9 @@
 #   # A specific lnd PR (by number, or paste the PR URL):
 #   contrib/build-dev-image --pr 9500
 #   contrib/build-dev-image https://github.com/lightningnetwork/lnd/pull/9500
+#
+#   # A branch in a fork, by pasting its GitHub page URL:
+#   contrib/build-dev-image https://github.com/<user>/lnd/tree/<branch>
 #
 #   # litd base from a local checkout (a dir named exactly lightning-terminal
 #   # auto-selects litd; any other name needs --litd):
@@ -383,11 +390,12 @@ fi
 # needless network call. It fails clearly when #N is an issue or does not exist.
 #
 # The build context then points buildx at the pull ref BY NAME
-# (...#refs/pull/N/head), NOT at the resolved SHA. GitHub serves a fork PR's head
-# through refs/pull/N/head, but it will not let buildx fetch that same commit by
-# bare SHA from the base repo until the PR merges onto an advertised branch — so
-# a SHA-pinned context fails for every unmerged fork PR ("reference is not a
-# tree"). Fetching the ref by name works whether or not the branch is in a fork.
+# (https://github.com/<owner>/<repo>.git#refs/pull/N/head), NOT at the resolved
+# SHA. GitHub serves a fork PR's head through refs/pull/N/head, but it will not
+# let buildx fetch that same commit by bare SHA from the base repo until the PR
+# merges onto an advertised branch — so a SHA-pinned context fails for every
+# unmerged fork PR ("reference is not a tree"). Fetching the ref by name works
+# whether or not the branch is in a fork.
 if [ -n "$PR_NUM" ] && [ -n "$PR_REPO_URL" ] && [ -z "$BASE_IMAGE_REF" ]; then
   # Capture stdout+stderr together: on success ls-remote prints only the ref
   # line to stdout, so the SHA extraction is unaffected; on failure pr_out holds
@@ -407,6 +415,72 @@ if [ -n "$PR_NUM" ] && [ -n "$PR_REPO_URL" ] && [ -z "$BASE_IMAGE_REF" ]; then
     printf '%s\n' "$pr_out" >&2
     exit 2
   fi
+fi
+
+# A GitHub web URL that names a ref — a branch/tag "tree" page
+# (https://github.com/<owner>/<repo>/tree/<ref>[/<subdir>]) or a release page
+# (https://github.com/<owner>/<repo>/releases/tag/<tag>) — is just a browser
+# spelling of a git URL + #ref, so rewrite it to
+# https://github.com/<owner>/<repo>.git#<ref> and let the normal base build
+# (below) handle it. Deferred to here (past the
+# --push-only / multi-arch guards, and skipped for a --pr or --base-image-ref
+# build) so a rejected invocation makes no network call, mirroring the PR path.
+# Match on the PATH only (strip ?query and #fragment first) so a web anchor does
+# not divert it. Only the ref-bearing path shapes are translated; any other
+# github.com URL (a plain .git clone URL, a bare repo page, a /blob/ file link)
+# is left untouched for buildx to handle as before.
+if [ -z "$PR_NUM" ] && [ -z "$BASE_IMAGE_REF" ] && [ -n "$BASE_CONTEXT" ]; then
+  gh_path="${BASE_CONTEXT%%\?*}"; gh_path="${gh_path%%#*}"
+  case "$gh_path" in
+    http://github.com/*|https://github.com/*|http://www.github.com/*|https://www.github.com/*)
+      gh_rest="${gh_path#*://}"; gh_rest="${gh_rest#*github.com/}"
+      gh_owner="${gh_rest%%/*}"; gh_rest="${gh_rest#*/}"
+      gh_repo="${gh_rest%%/*}";  gh_rest="${gh_rest#*/}"
+      gh_ref_path=""
+      case "$gh_rest" in
+        tree/?*)         gh_ref_path="${gh_rest#tree/}" ;;
+        releases/tag/?*) gh_ref_path="${gh_rest#releases/tag/}" ;;
+        releases|releases/*)
+          echo "only a specific release URL (https://github.com/<owner>/<repo>/releases/tag/<tag>) is supported, not '$BASE_CONTEXT'" >&2
+          echo "(resolve 'latest' to a concrete tag, or pass https://github.com/<owner>/<repo>/tree/<branch>)" >&2
+          exit 2 ;;
+      esac
+      if [ -n "$gh_ref_path" ]; then
+        if [ -z "$gh_owner" ] || [ -z "$gh_repo" ]; then
+          echo "could not parse owner/repo from '$BASE_CONTEXT'" >&2; exit 2
+        fi
+        gh_url="https://github.com/${gh_owner}/${gh_repo}.git"
+        # The ref is <ref>[/<subdir>] and <ref> may itself contain slashes, so it
+        # can't be split syntactically. Resolve it against the remote: one
+        # ls-remote of branches+tags (prompts disabled so a private/mistyped repo
+        # fails fast), matched LOCALLY for an exact name — a server-side prefix
+        # match would accept "main" for a "main-xyz" branch. The longest branch/tag
+        # name that equals the path or is a leading /-component of it wins, which
+        # keeps a slash-containing branch whole and drops a trailing subdirectory.
+        if ! gh_refs="$(GIT_TERMINAL_PROMPT=0 git ls-remote --heads --tags "$gh_url" 2>&1)"; then
+          echo "could not reach ${gh_url} to resolve the ref in '$BASE_CONTEXT':" >&2
+          printf '%s\n' "$gh_refs" >&2
+          exit 2
+        fi
+        gh_ref=""
+        while IFS=$'\t' read -r _ ref; do
+          [ -n "$ref" ] || continue
+          name="${ref#refs/heads/}"; name="${name#refs/tags/}"
+          if [ "$name" = "$gh_ref_path" ] || [ "${gh_ref_path#"$name"/}" != "$gh_ref_path" ]; then
+            [ "${#name}" -gt "${#gh_ref}" ] && gh_ref="$name"
+          fi
+        done <<EOF
+$gh_refs
+EOF
+        if [ -z "$gh_ref" ]; then
+          echo "no branch or tag in ${gh_url} matches '${gh_ref_path}' (from '$BASE_CONTEXT')" >&2
+          echo "(for a specific commit, pass ${gh_url}#<commit> as the base context)" >&2
+          exit 2
+        fi
+        BASE_CONTEXT="${gh_url}#${gh_ref}"
+      fi
+      ;;
+  esac
 fi
 
 if [ -n "$BASE_IMAGE_REF" ]; then
