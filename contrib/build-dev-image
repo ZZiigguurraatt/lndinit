@@ -280,10 +280,11 @@ done
 # Resolve a PR into a git base context (GitHub only). Two forms:
 #   --pr N                         -> the default repo's (lnd/litd) PR N
 #   <base-context> = a PR web URL  -> that repo's PR N
-# Each sets PR_REPO_URL + PR_NUM; the shared step below resolves the PR head
-# commit via `git ls-remote` (failing clearly if #N is an issue or does not
-# exist) and pins the build to that SHA, tagged pr-N. GitHub mirrors fork PR
-# heads into the base repo's refs/pull/*, so this works for PRs from forks too.
+# Each sets PR_REPO_URL + PR_NUM; the shared step below checks the PR exists
+# via `git ls-remote` (failing clearly if #N is an issue or does not exist) and
+# builds from refs/pull/N/head, tagged pr-N. GitHub mirrors fork PR heads into
+# the base repo's refs/pull/*, so fetching that ref by name works for PRs from
+# forks too (fetching the head by bare SHA would not — see the note below).
 if [ -n "$PR_NUM" ]; then
   case "$PR_NUM" in ''|0*|*[!0-9]*) echo "--pr requires a positive PR number, got '$PR_NUM'" >&2; exit 2 ;; esac
   if [ -n "$BASE_IMAGE_REF" ]; then
@@ -375,13 +376,18 @@ if [ "$PUSH_ONLY" = yes ]; then
   exit 0
 fi
 
-# For a PR build, resolve the head commit via `git ls-remote` (GitHub advertises
+# For a PR build, confirm the PR exists via `git ls-remote` (GitHub serves
 # refs/pull/N/head), with prompts disabled so a private or mistyped repo fails
 # fast instead of blocking. This runs AFTER the --push-only / multi-arch guards
 # and skips when --base-image-ref is set, so a rejected invocation never makes a
-# needless network call. It fails clearly when #N is an issue or does not exist,
-# and pins the build to the SHA so it does not depend on buildx being able to
-# fetch a refs/pull/* ref directly.
+# needless network call. It fails clearly when #N is an issue or does not exist.
+#
+# The build context then points buildx at the pull ref BY NAME
+# (...#refs/pull/N/head), NOT at the resolved SHA. GitHub serves a fork PR's head
+# through refs/pull/N/head, but it will not let buildx fetch that same commit by
+# bare SHA from the base repo until the PR merges onto an advertised branch — so
+# a SHA-pinned context fails for every unmerged fork PR ("reference is not a
+# tree"). Fetching the ref by name works whether or not the branch is in a fork.
 if [ -n "$PR_NUM" ] && [ -n "$PR_REPO_URL" ] && [ -z "$BASE_IMAGE_REF" ]; then
   # Capture stdout+stderr together: on success ls-remote prints only the ref
   # line to stdout, so the SHA extraction is unaffected; on failure pr_out holds
@@ -392,7 +398,10 @@ if [ -n "$PR_NUM" ] && [ -n "$PR_REPO_URL" ] && [ -z "$BASE_IMAGE_REF" ]; then
       echo "no PR #${PR_NUM} in ${PR_REPO_URL} — issues and PRs share numbers, so #${PR_NUM} may be an issue (or the PR does not exist)" >&2
       exit 2
     fi
-    BASE_CONTEXT="${PR_REPO_URL}#${pr_sha}"
+    # Build from the pull ref by name (see note above); the ls-remote SHA is
+    # only the existence check. buildx resolves the ref via FETCH_HEAD, so this
+    # fetches the current head at build time — which is what pr-N should track.
+    BASE_CONTEXT="${PR_REPO_URL}#refs/pull/${PR_NUM}/head"
   else
     echo "could not resolve PR #${PR_NUM} from ${PR_REPO_URL}:" >&2
     printf '%s\n' "$pr_out" >&2
